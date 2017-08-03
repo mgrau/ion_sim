@@ -1,7 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import integrate
 import scipy.constants as _c
+
+from scipy import integrate
+from matplotlib import animation
 
 
 class IonSim:
@@ -119,8 +121,8 @@ class IonSim:
         H = self.Hessian(x, y, z)
         w, v = np.linalg.eig(H)
         
-        v = v[:,w.argsort()]
-        w = w[w.argsort()]
+        v = v[:,np.abs(w).argsort()]
+        w = w[np.abs(w).argsort()]
         return w, v
 
     def f(self, t, x):
@@ -136,7 +138,7 @@ class IonSim:
         xp[5, :] /= self.m
         return xp.ravel()
 
-    def run(self, t=[0]):
+    def run(self, t):
         '''
         Performs Dormand & Prince adaptive 4th order explicit numerical integration
         '''
@@ -144,29 +146,50 @@ class IonSim:
         r.set_integrator('dopri5')
 
         try:
-            t = self.t
             self.x0 = self.x[-1, :, :]
             print("rerunning")
         except:
-            self.x = np.zeros((t.size,) + self.x0.shape)
-
+            pass
+        
+        x = np.zeros((t.size,) + self.x0.shape)
         r.t = t[0]
         r.set_initial_value(self.x0.ravel(), 0)
-        self.x[0, :, :] = self.x0
+        x[0, :, :] = self.x0
         for i, t_i in enumerate(t[1:]):
-            self.x[i + 1:, :] = np.reshape(r.integrate(t_i), (6, -1))
-        self.t = t
+            x[i + 1:, :] = np.reshape(r.integrate(t_i), (6, -1))
+        
+        try:
+            self.t = np.concatenate((self.t, self.t[-1] + t))
+            self.x = np.concatenate((self.x, x))
+        except:
+            self.t = t
+            self.x = x
 
 
-class IonPlot(ion_sim):
+class IonPlot(IonSim):
     def __init__(self):
         super().__init__()
 
     def plot(self, i=[], dim=0):
+        '''
+        Plot ion position or velocity as a function of time.
+        Makes a matplotlib call and creates a figure.
+        
+        Parameters
+        ----------
+        i : array, optional
+            A list of indices of ions to plot. An empty list may be used to plot
+            all ions.
+        dim : int, optional
+            The dimension of the ion state vector to plot. The default is 0,
+            corresponding to the 'x' position.
+        '''
         if not i:
             plt.plot(self.t, self.x[:, dim, :]);
         else:
             plt.plot(self.t, self.x[:, dim, i]);
+        plt.xlabel('Time (s)')
+        plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
 
     def animate(self):
         # First set up the figure, the axis, and the plot element we want to animate
@@ -175,7 +198,8 @@ class IonPlot(ion_sim):
         ax = plt.axes(xlim=(-rmax, rmax), ylim=(-rmax, rmax))
         points, = ax.plot([], [], 'b.', markersize=20)
         lines = [ax.plot([], [], 'k-')[0] for _ in range(self.x.shape[-1])]
-
+        plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
+        
         # initialization function: plot the background of each frame
         def init():
             points.set_data([], [])
@@ -202,7 +226,7 @@ class IonPlot(ion_sim):
 
     def plot_normal_modes(self, i=0):
         w, v = self.normal_modes()
-        freq = np.sqrt(np.abs(w)) / (2 * pi)
+        freq = np.sqrt(np.abs(w)) / (2 * _c.pi)
 
         freq_i = freq[i]
         v_i = np.reshape(np.real(v[:,i]), (3, -1))
@@ -235,4 +259,5 @@ class IonPlot(ion_sim):
         plt.xlabel('Frequency')
 
         plt.tight_layout()
+        plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
         plt.show()
