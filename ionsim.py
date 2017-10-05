@@ -1,8 +1,11 @@
-import numpy as np
+import autograd.numpy as np
 import matplotlib.pyplot as plt
 import scipy.constants as _c
+import numpy.linalg as LA
 
-from scipy import integrate
+import autograd
+
+from scipy import integrate, optimize
 from matplotlib import animation
 
 
@@ -43,21 +46,34 @@ class IonSim:
         self.x0[3:6, :] = np.random.normal(0, sigma_v, (3, n))
 
     def U(self, t, x, y, z):
-        return np.zeros(x.shape)
+        '''
+        By default the potential is 0. This function can be overloaded with a custom
+        potential.
+        '''
+        return 0
+
+    def U_Coulomb(self, x, y, z):
+        r2 = (x[:,None]-x)**2 + (y[:,None]-y)**2 + (z[:,None]-z)**2
+        r = np.sqrt(r2[np.triu_indices(np.size(x),1)])
+        return np.sum(self.kq2/r)
+
+    def U_total(self, t, x, y, z):
+        return np.sum(self.U(t, x, y, z)) + self.U_Coulomb(x, y, z)
 
     def F_U(self, t, x, y, z):
         '''
-        Calculates a force at point x, y, z by taking a numerical
-        gradient of U(t,x,y,z). The gradient is calculated by taking
-        the second order difference with a step size that is 1000
-        times the float precision.
+        Calculates the force at point x, y, z using the technique of automatic
+        differentiation of potential U(t, x, y, z).
         '''
-        _d = 1e3 * np.finfo(float).eps
-        Fx = -(self.U(t, x + _d, y, z) - self.U(t, x - _d, y, z)) / (2 * _d)
-        Fy = -(self.U(t, x, y + _d, z) - self.U(t, x, y - _d, z)) / (2 * _d)
-        Fz = -(self.U(t, x, y, z + _d) - self.U(t, x, y, z - _d)) / (2 * _d)
-        return np.array([Fx, Fy, Fz])
-
+        return -np.stack(autograd.multigrad(self.U, [1,2,3])(0, x, y, z))
+        
+    def F_Coulomb_autograd(self, x, y, z):
+        '''
+        calculates repulsive Coulomb force using automatic differentiation
+        assumes all particles have unit charge with the same sign
+        '''
+        return -np.stack(autograd.multigrad(self.U_Coulomb, [0,1,2])(x, y, z))
+        
     def F_damp(self, v):
         '''
         A damping force that is -Gamma*|v|^2
@@ -72,8 +88,7 @@ class IonSim:
         n = x.size
         r = np.zeros((3, n, n))
         for i, w in enumerate([x, y, z]):
-            r[i, :, :] = np.outer(w, np.ones((1, n))) - \
-                np.outer(np.ones((1, n)), w)
+            r[i, :, :] = w[:, None] - w
         r2 = np.sum(r**2, axis=0)
         np.fill_diagonal(r2, np.inf)
         r3 = r2**(-3 / 2)
@@ -90,53 +105,51 @@ class IonSim:
         F += self.F_damp(v)
         F += self.F_Coulomb(x, y, z)
         return F
-    
-    def min_d(self):
-        '''
-        calculated the minimum distance between ions
-        '''
-        x = self.x[-1, 0, :]
-        y = self.x[-1, 1, :]
-        z = self.x[-1, 2, :]
-        n = x.size
-        r = np.zeros((3, n, n))
-        for i, w in enumerate([x, y, z]):
-            r[i, :, :] = np.outer(w, np.ones((1, n))) - \
-                np.outer(np.ones((1, n)), w)
-        r = np.sqrt(np.sum(r**2, axis=0))
-        np.fill_diagonal(r, np.inf)
-        return np.min(r)
 
     def Hessian(self, t, x, y, z):
         '''
-        Calculate the Hessian numerically
+        Calculate the Hessian using automatic differentiation of the potential
         '''
-        n = len(x)
-        H = np.zeros((3, 3 * n, n))
-        F = lambda x, y, z: (self.F_U(t, x, y, z) + self.F_Coulomb(x, y, z)).ravel()
+        U = lambda x: self.U_total(t, *np.reshape(x, (3, -1)))
+        return autograd.hessian(U)(np.concatenate([x, y, z]).ravel())
 
-        _d = 1e3 * np.finfo(float).eps
-        for i in range(n):
-            _nd = np.zeros(n)
-            _nd[i] = _d
-            H[0, :, i] = -(F(x + _nd, y, z) - F(x - _nd, y, z)) / (2 * _d)
-            H[1, :, i] = -(F(x, y + _nd, z) - F(x, y - _nd, z)) / (2 * _d)
-            H[2, :, i] = -(F(x, y, z + _nd) - F(x, y, z - _nd)) / (2 * _d)
+    def equilibrium_position(self, x0, y0, z0):
+        '''
+        Finds the equilibrium positions by calculating the local potential minimum
+        '''
+        U = lambda x: self.U_total(0, *np.reshape(x, (3, -1)))
+        # using the negative of the force as the gradient makes the 
+        # minmization much more efficient
+        jac = lambda x: -self.F_total(0, *np.reshape(x, (3, -1))).ravel()
+        guess = np.concatenate([x0, y0, z0]).ravel()
+        # we need to use the electric constant as the tolerance to make sure the 
+        # minimization algorithm doesn't confuse a small numerical potential as 
+        # expressed in SI units as adequate and simply exit immediately
+        result = optimize.minimize(U, guess, jac=jac, tol=self.kq2)
+        return np.reshape(result.x, (3, -1))
 
-        H /= self.m
-        return H.transpose([0, 2, 1]).reshape((3 * n, 3 * n))
-
-    def normal_modes(self):
-        t = 0
-        x = self.x[-1, 0, :]
-        y = self.x[-1, 1, :]
-        z = self.x[-1, 2, :]
-        H = self.Hessian(t, x, y, z)
-        w, v = np.linalg.eig(H)
+    def normal_modes(self, x0, y0, z0):
+        H = self.Hessian(0, x0, y0, z0)
+        w2, v = np.linalg.eig(H)
         
-        v = v[:,np.abs(w).argsort()]
-        w = w[np.abs(w).argsort()]
-        return w, v
+        v = v[:,np.abs(w2).argsort()]
+        f = w2[np.abs(w2).argsort()]/self.m
+        f = np.sign(f)*np.sqrt(abs(f))/(2*_c.pi)
+        return f, v
+
+    def penning_modes(self, x0, y0, z0, B):
+        omega_c = _c.elementary_charge*B/self.m
+        n = x0.size
+        I = np.eye(3*n)
+        T = np.kron(np.cross(np.eye(3), omega_c), np.eye(n))
+        K = self.Hessian(0, x0, y0, z0)/self.m
+        A = np.bmat([[1j*T, I], [I, 0*T]])
+        B = np.bmat([[K, 0*K] ,[0*K, I]])
+        w, v = LA.eig(np.dot(LA.inv(A), B))
+        v = v[0:(3*n), np.real(w).argsort()]
+        v = v/LA.norm(v, axis=0)
+        f = np.real(w[np.real(w).argsort()])/(2*_c.pi)
+        return f, v.A
 
     def f(self, t, x):
         '''
@@ -230,19 +243,17 @@ def animate(sim):
     plt.close(fig)
     return anim
 
-def plot_normal_modes(sim, i=0, scale=3, surface=False):
-    w, v = sim.normal_modes()
-    freq = np.sqrt(np.abs(w)) / (2 * _c.pi)
+def plot_normal_modes(sim, x, i=0, scale=3, surface=False):
+    freq, v = sim.normal_modes(*x)
 
     freq_i = freq[i]
     v_i = np.reshape(np.real(v[:,i]), (3, -1))
-    x = sim.x[-1,0:3,:]
     
     drum = np.sum(np.abs(v_i[2,:])) > 0.1
     if drum:
-        rmax = np.max(np.abs(sim.x[-1, 0:3, :])) * 1.2
+        rmax = np.max(np.abs(x)) * 1.2
     else:
-        rmax = np.max(np.abs(sim.x[-1, 0:3, :])) * 2
+        rmax = np.max(np.abs(x)) * 3
     if not surface:
         drum = False
         
@@ -258,6 +269,7 @@ def plot_normal_modes(sim, i=0, scale=3, surface=False):
         plt.quiver(x[0,:], x[1,:], (v_i+x)[0,:], (v_i+x)[1,:], scale=scale)
     plt.xlim(-rmax,rmax)
     plt.ylim(-rmax,rmax)
+    plt.gca().set_aspect('equal', 'datalim')
 
     plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
     plt.stem(freq, np.ones(freq.shape), linefmt='0.5', markerfmt='0.75', basefmt='0.75')
