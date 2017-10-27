@@ -45,7 +45,7 @@ class IonSim:
         sigma_v = np.sqrt(_c.k * T / self.m)
         self.x0[3:6, :] = np.random.normal(0, sigma_v, (3, n))
 
-    def U(self, t, x, y, z):
+    def U(self, x, y, z, t=0):
         '''
         By default the potential is 0. This function can be overloaded with a custom
         potential.
@@ -57,20 +57,22 @@ class IonSim:
         r = np.sqrt(r2[np.triu_indices(np.size(x),1)])
         return np.sum(self.kq2/r)
 
-    def U_total(self, t, x, y, z):
-        return np.sum(self.U(t, x, y, z)) + self.U_Coulomb(x, y, z)
+    def U_total(self, x, y, z, t=0):
+        return np.sum(self.U(x, y, z, t)) + self.U_Coulomb(x, y, z)
 
-    def F_U(self, t, x, y, z):
+    def F_U(self, x, y, z, t=0):
         '''
         Calculates the force at point x, y, z using the technique of automatic
         differentiation of potential U(t, x, y, z).
         '''
-        return -np.stack(autograd.multigrad(self.U, [1,2,3])(0, x, y, z))
+        return -np.stack(autograd.multigrad(self.U, [0,1,2])(x, y, z, t))
         
     def F_Coulomb_autograd(self, x, y, z):
         '''
         calculates repulsive Coulomb force using automatic differentiation
-        assumes all particles have unit charge with the same sign
+        assumes all particles have unit charge with the same sign.
+        This is about 10x slower than F_Coulomb, where the force has been explicitly
+        vectorized with numpy
         '''
         return -np.stack(autograd.multigrad(self.U_Coulomb, [0,1,2])(x, y, z))
         
@@ -97,39 +99,46 @@ class IonSim:
             F[i, :] = self.kq2 * np.sum(r[i, :, :] * r3, axis=1)
         return F
 
-    def F_total(self, t, x, y, z, v=0):
+    def F_Coulomb_lin(self, x, y, z, x0=0, y0=0, z0=0):
+        pass
+
+    def F_total(self, x, y, z, v=0, t=0):
         '''
         Total force
         '''
-        F = self.F_U(t, x, y, z)
+        F = self.F_U(x, y, z, t)
         F += self.F_damp(v)
         F += self.F_Coulomb(x, y, z)
         return F
 
-    def Hessian(self, t, x, y, z):
+    def Hessian(self, x, y, z, t=0):
         '''
         Calculate the Hessian using automatic differentiation of the potential
         '''
-        U = lambda x: self.U_total(t, *np.reshape(x, (3, -1)))
+        U = lambda x: self.U_total(*np.reshape(x, (3, -1)), t)
         return autograd.hessian(U)(np.concatenate([x, y, z]).ravel())
 
-    def equilibrium_position(self, x0, y0, z0):
+    def equilibrium_position(self, x0, y0, z0, tol=1):
         '''
         Finds the equilibrium positions by calculating the local potential minimum
         '''
-        U = lambda x: self.U_total(0, *np.reshape(x, (3, -1)))
+        U = lambda x: self.U_total(*np.reshape(x, (3, -1)))
         # using the negative of the force as the gradient makes the 
         # minmization much more efficient
-        jac = lambda x: -self.F_total(0, *np.reshape(x, (3, -1))).ravel()
+        jac = lambda x: -self.F_total(*np.reshape(x, (3, -1))).ravel()
         guess = np.concatenate([x0, y0, z0]).ravel()
         # we need to use the electric constant as the tolerance to make sure the 
         # minimization algorithm doesn't confuse a small numerical potential as 
         # expressed in SI units as adequate and simply exit immediately
-        result = optimize.minimize(U, guess, jac=jac, tol=self.kq2)
+        result = optimize.minimize(U, guess, jac=jac, tol=tol*self.kq2)
         return np.reshape(result.x, (3, -1))
 
     def normal_modes(self, x0, y0, z0):
-        H = self.Hessian(0, x0, y0, z0)
+        '''
+        calculates normal mode frequencies (f) and eigenvectors (v) about some position
+        given by (x0, y0, z0), nominally the equilibrium position
+        '''
+        H = self.Hessian(x0, y0, z0)
         w2, v = np.linalg.eig(H)
         
         v = v[:,np.abs(w2).argsort()]
@@ -137,8 +146,8 @@ class IonSim:
         f = np.sign(f)*np.sqrt(abs(f))/(2*_c.pi)
         return f, v
 
-    def penning_modes(self, x0, y0, z0, B):
-        omega_c = _c.elementary_charge*B/self.m
+    def penning_modes(self, x0, y0, z0, Bz=0):
+        omega_c = _c.elementary_charge*Bz/self.m
         n = x0.size
         I = np.eye(3*n)
         T = np.kron(np.cross(np.eye(3), omega_c), np.eye(n))
@@ -158,7 +167,7 @@ class IonSim:
         x = np.reshape(x, (6, -1))
         xp = np.zeros(x.shape)
         xp[0:3, :] = x[3:6, :]
-        xp[3:6, :] = self.F_total(t, *x[0:3, :], x[3:6, :]) / self.m
+        xp[3:6, :] = self.F_total(*x[0:3, :], x[3:6, :], t) / self.m
         return xp.ravel()
 
     def run(self, t):
@@ -209,6 +218,7 @@ def plot(sim, i=[], dim=0):
         plt.plot(sim.t, sim.x[:, dim, i]);
         
     plt.xlabel('Time')
+    plt.ylabel(['x Position', 'y Position', 'z Position', 'vx Velocity', 'vy Velocity', 'vz Velocity'][dim])
     plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
 
 def animate(sim):
@@ -271,6 +281,39 @@ def plot_normal_modes(sim, x, i=0, scale=3, surface=False):
     plt.ylim(-rmax,rmax)
     plt.gca().set_aspect('equal', 'datalim')
 
+    plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
+    plt.stem(freq, np.ones(freq.shape), linefmt='0.5', markerfmt='0.75', basefmt='0.75')
+    _, stemlines, _ = plt.stem([freq[i]], [1], linewidth=5)
+    plt.setp(stemlines, 'linewidth', 3)
+    plt.ylim((0.25,0.75))
+    plt.yticks([])
+    plt.xlabel('Frequency')
+
+    plt.tight_layout()
+    plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
+    plt.show()
+
+def plot_penning_modes(sim, x, B, i=0, scale=3):
+    freq, v = sim.penning_modes(*x, B)
+    
+    v = v[:,freq>0]
+    freq = freq[freq>0]
+    
+    freq_i = freq[i]
+    v_i = np.squeeze(np.reshape(v[:,i], (3, -1)))
+    rmax = np.max(np.abs(x))*3
+    
+    plt.figure(figsize=(10,8))
+    n=5
+    plt.subplot2grid((n, 1), (0, 0), rowspan=n-1)
+    plt.plot(*x[0:2,:], 'ko', markersize=20)
+    plt.quiver(*x[0:2,:], *(np.real(v_i)+x)[0:2,:], color='b', scale=scale)
+    plt.quiver(*x[0:2,:], *(np.imag(v_i)-x)[0:2,:], color='r', scale=scale)
+    
+    plt.xlim(-rmax, rmax)
+    plt.ylim(-rmax, rmax)
+    plt.gca().set_aspect('equal', 'datalim')
+    
     plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
     plt.stem(freq, np.ones(freq.shape), linefmt='0.5', markerfmt='0.75', basefmt='0.75')
     _, stemlines, _ = plt.stem([freq[i]], [1], linewidth=5)
