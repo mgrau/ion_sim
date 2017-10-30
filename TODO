@@ -1,0 +1,6 @@
+create readme
+change time to be after x, y, z
+add more plotting helpers
+add initialization helpers, to create grids of initial conditions for lattices and things
+add anharmonic couplings
+create unit tests?
