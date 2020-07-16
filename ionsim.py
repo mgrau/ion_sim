@@ -1,9 +1,9 @@
-import autograd.numpy as np
+import jax.numpy as np
 import matplotlib.pyplot as plt
 import scipy.constants as _c
 import numpy.linalg as LA
 
-import autograd
+import jax
 
 from scipy import integrate, optimize
 from matplotlib import animation
@@ -27,7 +27,7 @@ class IonSim:
         '''
         Creates an initial state vector of n ions described by a temperature T
         and a gaussian spread in position sigma=[sigma_x, sigma_y, sigma_z]
-        
+
         Parameters
         ----------
         n : int
@@ -53,8 +53,8 @@ class IonSim:
         return 0
 
     def U_Coulomb(self, x, y, z):
-        r2 = (x[:,None]-x)**2 + (y[:,None]-y)**2 + (z[:,None]-z)**2
-        r = np.sqrt(r2[np.triu_indices(np.size(x),1)])
+        r2 = (x[:, None]-x)**2 + (y[:, None]-y)**2 + (z[:, None]-z)**2
+        r = np.sqrt(r2[np.triu_indices(np.size(x), 1)])
         return np.sum(self.kq2/r)
 
     def U_total(self, x, y, z, t=0):
@@ -65,8 +65,8 @@ class IonSim:
         Calculates the force at point x, y, z using the technique of automatic
         differentiation of potential U(t, x, y, z).
         '''
-        return -np.stack(autograd.multigrad(self.U, [0,1,2])(x, y, z, t))
-        
+        return -np.stack(autograd.multigrad(self.U, [0, 1, 2])(x, y, z, t))
+
     def F_Coulomb_autograd(self, x, y, z):
         '''
         calculates repulsive Coulomb force using automatic differentiation
@@ -74,8 +74,8 @@ class IonSim:
         This is about 10x slower than F_Coulomb, where the force has been explicitly
         vectorized with numpy
         '''
-        return -np.stack(autograd.multigrad(self.U_Coulomb, [0,1,2])(x, y, z))
-        
+        return -np.stack(autograd.multigrad(self.U_Coulomb, [0, 1, 2])(x, y, z))
+
     def F_damp(self, v):
         '''
         A damping force that is -Gamma*|v|^2
@@ -115,20 +115,20 @@ class IonSim:
         '''
         Calculate the Hessian using automatic differentiation of the potential
         '''
-        U = lambda x: self.U_total(*np.reshape(x, (3, -1)), t)
+        def U(x): return self.U_total(*np.reshape(x, (3, -1)), t)
         return autograd.hessian(U)(np.concatenate([x, y, z]).ravel())
 
     def equilibrium_position(self, x0, y0, z0, tol=1):
         '''
         Finds the equilibrium positions by calculating the local potential minimum
         '''
-        U = lambda x: self.U_total(*np.reshape(x, (3, -1)))
-        # using the negative of the force as the gradient makes the 
+        def U(x): return self.U_total(*np.reshape(x, (3, -1)))
+        # using the negative of the force as the gradient makes the
         # minmization much more efficient
-        jac = lambda x: -self.F_total(*np.reshape(x, (3, -1))).ravel()
+        def jac(x): return -self.F_total(*np.reshape(x, (3, -1))).ravel()
         guess = np.concatenate([x0, y0, z0]).ravel()
-        # we need to use the electric constant as the tolerance to make sure the 
-        # minimization algorithm doesn't confuse a small numerical potential as 
+        # we need to use the electric constant as the tolerance to make sure the
+        # minimization algorithm doesn't confuse a small numerical potential as
         # expressed in SI units as adequate and simply exit immediately
         result = optimize.minimize(U, guess, jac=jac, tol=tol*self.kq2)
         return np.reshape(result.x, (3, -1))
@@ -140,8 +140,8 @@ class IonSim:
         '''
         H = self.Hessian(x0, y0, z0)
         w2, v = np.linalg.eig(H)
-        
-        v = v[:,np.abs(w2).argsort()]
+
+        v = v[:, np.abs(w2).argsort()]
         f = w2[np.abs(w2).argsort()]/self.m
         f = np.sign(f)*np.sqrt(abs(f))/(2*_c.pi)
         return f, v
@@ -153,7 +153,7 @@ class IonSim:
         T = np.kron(np.cross(np.eye(3), omega_c), np.eye(n))
         K = self.Hessian(0, x0, y0, z0)/self.m
         A = np.bmat([[1j*T, I], [I, 0*T]])
-        B = np.bmat([[K, 0*K] ,[0*K, I]])
+        B = np.bmat([[K, 0*K], [0*K, I]])
         w, v = LA.eig(np.dot(LA.inv(A), B))
         v = v[0:(3*n), np.real(w).argsort()]
         v = v/LA.norm(v, axis=0)
@@ -182,14 +182,14 @@ class IonSim:
             print("rerunning")
         except:
             pass
-        
+
         x = np.zeros((t.size,) + self.x0.shape)
         r.t = t[0]
         r.set_initial_value(self.x0.ravel(), 0)
         x[0, :, :] = self.x0
         for i, t_i in enumerate(t[1:]):
             x[i + 1:, :] = np.reshape(r.integrate(t_i), (6, -1))
-        
+
         try:
             self.t = np.concatenate((self.t, self.t[-1] + t))
             self.x = np.concatenate((self.x, x))
@@ -202,7 +202,7 @@ def plot(sim, i=[], dim=0):
     '''
     Plot ion position or velocity as a function of time.
     Makes a matplotlib call and creates a figure.
-    
+
     Parameters
     ----------
     i : array, optional
@@ -213,13 +213,15 @@ def plot(sim, i=[], dim=0):
         corresponding to the 'x' position.
     '''
     if not i:
-        plt.plot(sim.t, sim.x[:, dim, :]);
+        plt.plot(sim.t, sim.x[:, dim, :])
     else:
-        plt.plot(sim.t, sim.x[:, dim, i]);
-        
+        plt.plot(sim.t, sim.x[:, dim, i])
+
     plt.xlabel('Time')
-    plt.ylabel(['x Position', 'y Position', 'z Position', 'vx Velocity', 'vy Velocity', 'vz Velocity'][dim])
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
+    plt.ylabel(['x Position', 'y Position', 'z Position',
+                'vx Velocity', 'vy Velocity', 'vz Velocity'][dim])
+    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
+
 
 def animate(sim):
     # First set up the figure, the axis, and the plot element we want to animate
@@ -228,8 +230,9 @@ def animate(sim):
     ax = plt.axes(xlim=(-rmax, rmax), ylim=(-rmax, rmax))
     points, = ax.plot([], [], 'b.', markersize=20)
     lines = [ax.plot([], [], 'k-')[0] for _ in range(sim.x.shape[-1])]
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
+    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
     # initialization function: plot the background of each frame
+
     def init():
         points.set_data([], [])
         for line in lines:
@@ -253,75 +256,79 @@ def animate(sim):
     plt.close(fig)
     return anim
 
+
 def plot_normal_modes(sim, x, i=0, scale=3, surface=False):
     freq, v = sim.normal_modes(*x)
 
     freq_i = freq[i]
-    v_i = np.reshape(np.real(v[:,i]), (3, -1))
-    
-    drum = np.sum(np.abs(v_i[2,:])) > 0.1
+    v_i = np.reshape(np.real(v[:, i]), (3, -1))
+
+    drum = np.sum(np.abs(v_i[2, :])) > 0.1
     if drum:
         rmax = np.max(np.abs(x)) * 1.2
     else:
         rmax = np.max(np.abs(x)) * 3
     if not surface:
         drum = False
-        
 
-    plt.figure(figsize=(10,8))
+    plt.figure(figsize=(10, 8))
 
-    n=5
+    n = 5
     plt.subplot2grid((n, 1), (0, 0), rowspan=n-1)
     if drum:
-        plt.tripcolor(x[0,:], x[1,:], v_i[2,:], cmap='coolwarm', shading='gouraud')
+        plt.tripcolor(x[0, :], x[1, :], v_i[2, :],
+                      cmap='coolwarm', shading='gouraud')
     else:
-        plt.plot(x[0,:], x[1,:], 'o', markersize=20)
-        plt.quiver(x[0,:], x[1,:], (v_i+x)[0,:], (v_i+x)[1,:], scale=scale)
-    plt.xlim(-rmax,rmax)
-    plt.ylim(-rmax,rmax)
-    plt.gca().set_aspect('equal', 'datalim')
-
-    plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
-    plt.stem(freq, np.ones(freq.shape), linefmt='0.5', markerfmt='0.75', basefmt='0.75')
-    _, stemlines, _ = plt.stem([freq[i]], [1], linewidth=5)
-    plt.setp(stemlines, 'linewidth', 3)
-    plt.ylim((0.25,0.75))
-    plt.yticks([])
-    plt.xlabel('Frequency')
-
-    plt.tight_layout()
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
-    plt.show()
-
-def plot_penning_modes(sim, x, B, i=0, scale=3):
-    freq, v = sim.penning_modes(*x, B)
-    
-    v = v[:,freq>0]
-    freq = freq[freq>0]
-    
-    freq_i = freq[i]
-    v_i = np.squeeze(np.reshape(v[:,i], (3, -1)))
-    rmax = np.max(np.abs(x))*3
-    
-    plt.figure(figsize=(10,8))
-    n=5
-    plt.subplot2grid((n, 1), (0, 0), rowspan=n-1)
-    plt.plot(*x[0:2,:], 'ko', markersize=20)
-    plt.quiver(*x[0:2,:], *(np.real(v_i)+x)[0:2,:], color='b', scale=scale)
-    plt.quiver(*x[0:2,:], *(np.imag(v_i)-x)[0:2,:], color='r', scale=scale)
-    
+        plt.plot(x[0, :], x[1, :], 'o', markersize=20)
+        plt.quiver(x[0, :], x[1, :], (v_i+x)[0, :], (v_i+x)[1, :], scale=scale)
     plt.xlim(-rmax, rmax)
     plt.ylim(-rmax, rmax)
     plt.gca().set_aspect('equal', 'datalim')
-    
+
     plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
-    plt.stem(freq, np.ones(freq.shape), linefmt='0.5', markerfmt='0.75', basefmt='0.75')
+    plt.stem(freq, np.ones(freq.shape), linefmt='0.5',
+             markerfmt='0.75', basefmt='0.75')
     _, stemlines, _ = plt.stem([freq[i]], [1], linewidth=5)
     plt.setp(stemlines, 'linewidth', 3)
-    plt.ylim((0.25,0.75))
+    plt.ylim((0.25, 0.75))
     plt.yticks([])
     plt.xlabel('Frequency')
 
     plt.tight_layout()
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0,0))
+    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
+    plt.show()
+
+
+def plot_penning_modes(sim, x, B, i=0, scale=3):
+    freq, v = sim.penning_modes(*x, B)
+
+    v = v[:, freq > 0]
+    freq = freq[freq > 0]
+
+    freq_i = freq[i]
+    v_i = np.squeeze(np.reshape(v[:, i], (3, -1)))
+    rmax = np.max(np.abs(x))*3
+
+    plt.figure(figsize=(10, 8))
+    n = 5
+    plt.subplot2grid((n, 1), (0, 0), rowspan=n-1)
+    plt.plot(*x[0:2, :], 'ko', markersize=20)
+    plt.quiver(*x[0:2, :], *(np.real(v_i)+x)[0:2, :], color='b', scale=scale)
+    plt.quiver(*x[0:2, :], *(np.imag(v_i)-x)[0:2, :], color='r', scale=scale)
+
+    plt.xlim(-rmax, rmax)
+    plt.ylim(-rmax, rmax)
+    plt.gca().set_aspect('equal', 'datalim')
+
+    plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
+    plt.stem(freq, np.ones(freq.shape), linefmt='0.5',
+             markerfmt='0.75', basefmt='0.75')
+    _, stemlines, _ = plt.stem([freq[i]], [1], linewidth=5)
+    plt.setp(stemlines, 'linewidth', 3)
+    plt.ylim((0.25, 0.75))
+    plt.yticks([])
+    plt.xlabel('Frequency')
+
+    plt.tight_layout()
+    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
     plt.show()
