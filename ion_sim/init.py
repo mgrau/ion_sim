@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def thermal(ions, T, sigma=(1e-6, 1e-6, 1e-6)):
+def thermal(ions, T):
     '''
     Creates an initial state vector of n ions described by a temperature T
     and a gaussian spread in position sigma=[sigma_x, sigma_y, sigma_z]
