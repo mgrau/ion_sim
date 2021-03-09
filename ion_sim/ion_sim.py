@@ -1,20 +1,36 @@
-import jax.numpy as np
-import matplotlib.pyplot as plt
-import scipy.constants as _c
-import numpy.linalg as LA
+import numpy as np
+import scipy
+import scipy.optimize
+import scipy.integrate
+import autograd
+import pint
 
-import jax
-
-from scipy import integrate, optimize
-from matplotlib import animation
+from math import pi as π
 
 
 class IonSim:
-    def __init__(self):
-        self.m = 40 * _c.atomic_mass
-        self.kq2 = _c.elementary_charge**2 / (4 * _c.pi * _c.epsilon_0)
-        self.gamma = np.array([0, 0, 0]) * 1e-6
-        self.x0 = []
+    __u: pint.UnitRegistry = None
+    __d: int
+    __m: float = None
+    __m_unit: pint.Unit = None
+    __Γ: float = None
+    __Γ_unit: pint.Unit = None
+
+    __x0: np.array = None
+    __x_unit: pint.Unit = None
+    __v0: np.array = None
+    __v_unit: pint.Unit = None
+    __t: np.array = None
+    __t_unit: pint.Unit = None
+    __x: np.array = None
+    __v: np.array = None
+
+    def __init__(self, unit_registry: pint.UnitRegistry = None, d=3):
+        self.__d = d
+        self.u = unit_registry
+        self.m = self.u('1 amu')
+
+        # self.gamma = np.array([0, 0, 0]) * 1e-6
 
     def __repr__(self):
         s = '''
@@ -23,27 +39,103 @@ class IonSim:
         ''' % (self.x0.shape[1])
         return s
 
-    def init_thermal(self, n, T, sigma=(1e-6, 1e-6, 1e-6)):
-        '''
-        Creates an initial state vector of n ions described by a temperature T
-        and a gaussian spread in position sigma=[sigma_x, sigma_y, sigma_z]
+    @property
+    def d(self):
+        return self.__d
 
-        Parameters
-        ----------
-        n : int
-            The number of ions to initialized.
-        T : float
-            the initial temperature of the ions
-        sigma : tuple
-            sigma=[sigma_x, sigma_y, sigma_z] is a tuple of 3 std used to describe
-            the gaussian probaiblity distribution of initial position
-        '''
-        self.x0 = np.zeros((6, n))
-        self.x0[0, :] = np.random.normal(0, sigma[0], (1, n))
-        self.x0[1, :] = np.random.normal(0, sigma[1], (1, n))
-        self.x0[2, :] = np.random.normal(0, sigma[2], (1, n))
-        sigma_v = np.sqrt(_c.k * T / self.m)
-        self.x0[3:6, :] = np.random.normal(0, sigma_v, (3, n))
+    @property
+    def u(self):
+        return self.__u
+
+    @u.setter
+    def u(self, unit_registry: pint.UnitRegistry):
+        self.__u = unit_registry
+
+        # recalculate constants in base units whenever unit registry is set
+        self.__kq2 = (self.u.e**2/(4*π*self.u.ε_0)).to_base_units().m
+
+    @property
+    def m(self):
+        return (self.__m * self.u('kg').to_base_units().units).to(self.__m_unit)
+
+    @m.setter
+    def m(self, m: pint.Quantity):
+        self.__m = m.to_base_units().m
+        self.__m_unit = m.units
+        self.Γ = self.u('0 Hz')
+        self.x0 = np.zeros((self.d, self.N)) * self.u('m')
+        self.v0 = np.zeros((self.d, self.N)) * self.u('m/s')
+
+    @property
+    def N(self):
+        if self.m is None:
+            return 0
+        try:
+            return len(self.m)
+        except TypeError:
+            return 1
+
+    @property
+    def gamma(self):
+        return (self.__Γ * self.u('s^-1').to_base_units()).to(self.__Γ_unit)
+
+    @gamma.setter
+    def gamma(self, gamma):
+        if hasattr(gamma, 'shape') and (gamma.shape == (self.d, self.N)):
+            Γ = gamma
+        else:
+            try:
+                if len(gamma) == self.N:
+                    Γ = np.broadcast_to(gamma, (self.d, self.N))
+                elif len(gamma) == self.d:
+                    Γ = np.broadcast_to(gamma, (self.N, self.d)).T
+            except TypeError:
+                Γ = gamma * np.ones((self.d, self.N))
+        self.__Γ = Γ.to_base_units().m
+        self.__Γ_unit = Γ.units
+
+    @property
+    def Γ(self):
+        return self.gamma
+
+    @Γ.setter
+    def Γ(self, gamma):
+        self.gamma = gamma
+
+    @property
+    def x0(self):
+        return (self.__x0 * self.u('m').to_base_units().units).to(self.__x_unit)
+
+    @x0.setter
+    def x0(self, x0: pint.Quantity):
+        self.__x0 = x0.to_base_units().m
+        self.__x_unit = x0.units
+
+    @property
+    def v0(self):
+        return (self.__v0 * self.u('m/s').to_base_units().units).to(self.__v_unit)
+
+    @v0.setter
+    def v0(self, v0: pint.Quantity):
+        self.__v0 = v0.to_base_units().m
+        self.__v_unit = v0.units
+
+    @property
+    def t(self):
+        return (self.__t * self.u('s').to_base_units().units).to(self.__t_unit)
+
+    @t.setter
+    def t(self, t: pint.Quantity):
+        self.__t = t.to_base_units().m
+        self.__t_unit = t.units
+
+    @property
+    def x(self):
+        return (self.__x * self.u('m').to_base_units().units).to(self.__x_unit)
+
+    @property
+    def v(self):
+        return (self.__v * self.u('m/s').to_base_units().units).to(self.__v_unit)
 
     def U(self, x, y, z, t=0):
         '''
@@ -54,33 +146,36 @@ class IonSim:
 
     def U_Coulomb(self, x, y, z):
         r2 = (x[:, None]-x)**2 + (y[:, None]-y)**2 + (z[:, None]-z)**2
-        r = np.sqrt(r2[np.triu_indices(np.size(x), 1)])
-        return np.sum(self.kq2/r)
+        # pylint: disable=no-member
+        return autograd.numpy.sum(self.__kq2 / r2[autograd.numpy.triu_indices(x.size, 1)]**(1/2))
 
     def U_total(self, x, y, z, t=0):
-        return np.sum(self.U(x, y, z, t)) + self.U_Coulomb(x, y, z)
+        # pylint: disable=no-member
+        return autograd.numpy.sum(self.U(x, y, z, t)) + self.U_Coulomb(x, y, z)
 
     def F_U(self, x, y, z, t=0):
         '''
         Calculates the force at point x, y, z using the technique of automatic
         differentiation of potential U(t, x, y, z).
         '''
-        return -np.stack(autograd.multigrad(self.U, [0, 1, 2])(x, y, z, t))
+        # pylint: disable=unexpected-keyword-arg, no-value-for-parameter
+        return -1 * np.stack(autograd.elementwise_grad(self.U, argnum=(0, 1, 2))(x, y, z, t))
 
     def F_Coulomb_autograd(self, x, y, z):
         '''
         calculates repulsive Coulomb force using automatic differentiation
         assumes all particles have unit charge with the same sign.
-        This is about 10x slower than F_Coulomb, where the force has been explicitly
+        This is about 2x slower than F_Coulomb, where the force has been explicitly
         vectorized with numpy
         '''
-        return -np.stack(autograd.multigrad(self.U_Coulomb, [0, 1, 2])(x, y, z))
+        # pylint: disable=unexpected-keyword-arg, no-value-for-parameter
+        return -1 * np.stack(autograd.elementwise_grad(self.U_Coulomb, argnum=(0, 1, 2))(x, y, z))
 
     def F_damp(self, v):
         '''
-        A damping force that is -Gamma*|v|^2
+        A damping force that is -Gamma*v
         '''
-        return -np.expand_dims(self.gamma, axis=1).repeat(self.x0.shape[1], axis=1) * v
+        return -self.__m * self.__Γ * v
 
     def F_Coulomb(self, x, y, z):
         '''
@@ -88,19 +183,17 @@ class IonSim:
         with the same sign
         '''
         n = x.size
-        r = np.zeros((3, n, n))
+        r = np.zeros((self.d, n, n))
         for i, w in enumerate([x, y, z]):
             r[i, :, :] = w[:, None] - w
         r2 = np.sum(r**2, axis=0)
         np.fill_diagonal(r2, np.inf)
         r3 = r2**(-3 / 2)
-        F = np.zeros((3, n))
-        for i in range(3):
-            F[i, :] = self.kq2 * np.sum(r[i, :, :] * r3, axis=1)
-        return F
+        F = np.zeros((self.d, n))
 
-    def F_Coulomb_lin(self, x, y, z, x0=0, y0=0, z0=0):
-        pass
+        for i in range(self.d):
+            F[i, :] = np.sum(r[i, :, :] * r3, axis=1)
+        return self.__kq2*F
 
     def F_total(self, x, y, z, v=0, t=0):
         '''
@@ -111,224 +204,77 @@ class IonSim:
         F += self.F_Coulomb(x, y, z)
         return F
 
+    def equilibrium_position(self, x0=None, y0=None, z0=None, t=0, tol=1):
+        '''
+        Finds the equilibrium positions by calculating the local potential minimum
+        '''
+        if (x0 is None) or (y0 is None) or (z0 is None):
+            x0 = self.x0[0, :]
+            y0 = self.x0[1, :]
+            z0 = self.x0[2, :]
+        guess = pint.Quantity(np.concatenate([x0, y0, z0]).ravel())
+        # using the negative of the force as the gradient makes the
+        # minmization much more efficient
+
+        # we need to use the electric constant as the tolerance to make sure the
+        # minimization algorithm doesn't confuse a small numerical potential as
+        # expressed in SI units as adequate and simply exit immediately
+        result = scipy.optimize.minimize(
+            fun=lambda x: self.U_total(*x.reshape(self.d, -1), t=t),
+            jac=lambda x: -self.F_total(*x.reshape(self.d, -1)).ravel(),
+            x0=guess.to_base_units().m,
+            tol=tol*self.__kq2)
+        return (result.x.reshape((self.d, -1)) * self.u('m').to_base_units().units).to(guess.units)
+
     def Hessian(self, x, y, z, t=0):
         '''
         Calculate the Hessian using automatic differentiation of the potential
         '''
-        def U(x): return self.U_total(*np.reshape(x, (3, -1)), t)
-        return autograd.hessian(U)(np.concatenate([x, y, z]).ravel())
 
-    def equilibrium_position(self, x0, y0, z0, tol=1):
-        '''
-        Finds the equilibrium positions by calculating the local potential minimum
-        '''
-        def U(x): return self.U_total(*np.reshape(x, (3, -1)))
-        # using the negative of the force as the gradient makes the
-        # minmization much more efficient
-        def jac(x): return -self.F_total(*np.reshape(x, (3, -1))).ravel()
-        guess = np.concatenate([x0, y0, z0]).ravel()
-        # we need to use the electric constant as the tolerance to make sure the
-        # minimization algorithm doesn't confuse a small numerical potential as
-        # expressed in SI units as adequate and simply exit immediately
-        result = optimize.minimize(U, guess, jac=jac, tol=tol*self.kq2)
-        return np.reshape(result.x, (3, -1))
+        def U(x): return self.U_total(*x.reshape(self.d, -1), t=t)
+        # pylint: disable=no-value-for-parameter
+        def F(x): return (autograd.jacobian(U)(
+            x).reshape(self.d, -1) / self.__m).ravel()
+        # pylint: disable=no-value-for-parameter
+        return autograd.jacobian(F)(np.concatenate([x, y, z]).ravel())
 
-    def normal_modes(self, x0, y0, z0):
+    def normal_modes(self, x=None, y=None, z=None):
         '''
         calculates normal mode frequencies (f) and eigenvectors (v) about some position
         given by (x0, y0, z0), nominally the equilibrium position
         '''
-        H = self.Hessian(x0, y0, z0)
-        w2, v = np.linalg.eig(H)
+        if (x is None) or (y is None) or (z is None):
+            x0 = self.equilibrium_position()
+        else:
+            x0 = np.vstack([x, y, z])
+        H = self.Hessian(*x0.to_base_units().m)
+        λ, v = np.linalg.eig(H)
 
-        v = v[:, np.abs(w2).argsort()]
-        f = w2[np.abs(w2).argsort()]/self.m
-        f = np.sign(f)*np.sqrt(abs(f))/(2*_c.pi)
+        sort = np.abs(λ).argsort()
+        v = np.reshape(v[:, sort], self.x0.shape + (-1,))
+        ω2 = λ[sort]
+        f = ((np.sign(ω2)*abs(ω2)**(1/2)/(2*π)) *
+             self.u('Hz').to_base_units().units).to('Hz')
         return f, v
-
-    def penning_modes(self, x0, y0, z0, Bz=0):
-        omega_c = _c.elementary_charge*Bz/self.m
-        n = x0.size
-        I = np.eye(3*n)
-        T = np.kron(np.cross(np.eye(3), omega_c), np.eye(n))
-        K = self.Hessian(0, x0, y0, z0)/self.m
-        A = np.bmat([[1j*T, I], [I, 0*T]])
-        B = np.bmat([[K, 0*K], [0*K, I]])
-        w, v = LA.eig(np.dot(LA.inv(A), B))
-        v = v[0:(3*n), np.real(w).argsort()]
-        v = v/LA.norm(v, axis=0)
-        f = np.real(w[np.real(w).argsort()])/(2*_c.pi)
-        return f, v.A
 
     def f(self, t, x):
         '''
         calculates the derivative of the position and velocity
         '''
-        x = np.reshape(x, (6, -1))
+        x = np.reshape(x, (2*self.d, -1))
         xp = np.zeros(x.shape)
-        xp[0:3, :] = x[3:6, :]
-        xp[3:6, :] = self.F_total(*x[0:3, :], x[3:6, :], t) / self.m
+        xp[:self.d, :] = x[self.d:, :]
+        xp[self.d:, :] = self.F_total(
+            *x[:self.d, :], x[self.d:, :], t) / self.__m
         return xp.ravel()
 
-    def run(self, t):
-        '''
-        Performs Dormand & Prince adaptive 4th order explicit numerical integration
-        '''
-        r = integrate.ode(self.f)
-        r.set_integrator('dopri5')
-
-        try:
-            self.x0 = self.x[-1, :, :]
-            print("rerunning")
-        except:
-            pass
-
-        x = np.zeros((t.size,) + self.x0.shape)
-        r.t = t[0]
-        r.set_initial_value(self.x0.ravel(), 0)
-        x[0, :, :] = self.x0
-        for i, t_i in enumerate(t[1:]):
-            x[i + 1:, :] = np.reshape(r.integrate(t_i), (6, -1))
-
-        try:
-            self.t = np.concatenate((self.t, self.t[-1] + t))
-            self.x = np.concatenate((self.x, x))
-        except:
-            self.t = t
-            self.x = x
-
-
-def plot(sim, i=[], dim=0):
-    '''
-    Plot ion position or velocity as a function of time.
-    Makes a matplotlib call and creates a figure.
-
-    Parameters
-    ----------
-    i : array, optional
-        A list of indices of ions to plot. An empty list may be used to plot
-        all ions.
-    dim : int, optional
-        The dimension of the ion state vector to plot. The default is 0,
-        corresponding to the 'x' position.
-    '''
-    if not i:
-        plt.plot(sim.t, sim.x[:, dim, :])
-    else:
-        plt.plot(sim.t, sim.x[:, dim, i])
-
-    plt.xlabel('Time')
-    plt.ylabel(['x Position', 'y Position', 'z Position',
-                'vx Velocity', 'vy Velocity', 'vz Velocity'][dim])
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
-
-
-def animate(sim):
-    # First set up the figure, the axis, and the plot element we want to animate
-    fig = plt.figure()
-    rmax = np.max(sim.x[:, 0:2, :]) * 1.1
-    ax = plt.axes(xlim=(-rmax, rmax), ylim=(-rmax, rmax))
-    points, = ax.plot([], [], 'b.', markersize=20)
-    lines = [ax.plot([], [], 'k-')[0] for _ in range(sim.x.shape[-1])]
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
-    # initialization function: plot the background of each frame
-
-    def init():
-        points.set_data([], [])
-        for line in lines:
-            line.set_data([], [])
-        return lines
-
-    # animation function.  This is called sequentially
-    def draw_frame(frame_i):
-        points.set_data(sim.x[frame_i, 0, :], sim.x[frame_i, 1, :])
-        for i, line in enumerate(lines):
-            line.set_data(sim.x[(frame_i - 5):frame_i, 0, i],
-                          sim.x[(frame_i - 5):frame_i, 1, i])
-        return lines
-
-    # call the animator.  blit=True means only re-draw the parts that have changed.
-    anim = animation.FuncAnimation(fig, draw_frame, init_func=init,
-                                   frames=sim.t.size,
-                                   interval=(1000 / 60),
-                                   blit=True,
-                                   repeat=False)
-    plt.close(fig)
-    return anim
-
-
-def plot_normal_modes(sim, x, i=0, scale=3, surface=False):
-    freq, v = sim.normal_modes(*x)
-
-    freq_i = freq[i]
-    v_i = np.reshape(np.real(v[:, i]), (3, -1))
-
-    drum = np.sum(np.abs(v_i[2, :])) > 0.1
-    if drum:
-        rmax = np.max(np.abs(x)) * 1.2
-    else:
-        rmax = np.max(np.abs(x)) * 3
-    if not surface:
-        drum = False
-
-    plt.figure(figsize=(10, 8))
-
-    n = 5
-    plt.subplot2grid((n, 1), (0, 0), rowspan=n-1)
-    if drum:
-        plt.tripcolor(x[0, :], x[1, :], v_i[2, :],
-                      cmap='coolwarm', shading='gouraud')
-    else:
-        plt.plot(x[0, :], x[1, :], 'o', markersize=20)
-        plt.quiver(x[0, :], x[1, :], (v_i+x)[0, :], (v_i+x)[1, :], scale=scale)
-    plt.xlim(-rmax, rmax)
-    plt.ylim(-rmax, rmax)
-    plt.gca().set_aspect('equal', 'datalim')
-
-    plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
-    plt.stem(freq, np.ones(freq.shape), linefmt='0.5',
-             markerfmt='0.75', basefmt='0.75')
-    _, stemlines, _ = plt.stem([freq[i]], [1], linewidth=5)
-    plt.setp(stemlines, 'linewidth', 3)
-    plt.ylim((0.25, 0.75))
-    plt.yticks([])
-    plt.xlabel('Frequency')
-
-    plt.tight_layout()
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
-    plt.show()
-
-
-def plot_penning_modes(sim, x, B, i=0, scale=3):
-    freq, v = sim.penning_modes(*x, B)
-
-    v = v[:, freq > 0]
-    freq = freq[freq > 0]
-
-    freq_i = freq[i]
-    v_i = np.squeeze(np.reshape(v[:, i], (3, -1)))
-    rmax = np.max(np.abs(x))*3
-
-    plt.figure(figsize=(10, 8))
-    n = 5
-    plt.subplot2grid((n, 1), (0, 0), rowspan=n-1)
-    plt.plot(*x[0:2, :], 'ko', markersize=20)
-    plt.quiver(*x[0:2, :], *(np.real(v_i)+x)[0:2, :], color='b', scale=scale)
-    plt.quiver(*x[0:2, :], *(np.imag(v_i)-x)[0:2, :], color='r', scale=scale)
-
-    plt.xlim(-rmax, rmax)
-    plt.ylim(-rmax, rmax)
-    plt.gca().set_aspect('equal', 'datalim')
-
-    plt.subplot2grid((n, 1), (n-1, 0), rowspan=1)
-    plt.stem(freq, np.ones(freq.shape), linefmt='0.5',
-             markerfmt='0.75', basefmt='0.75')
-    _, stemlines, _ = plt.stem([freq[i]], [1], linewidth=5)
-    plt.setp(stemlines, 'linewidth', 3)
-    plt.ylim((0.25, 0.75))
-    plt.yticks([])
-    plt.xlabel('Frequency')
-
-    plt.tight_layout()
-    plt.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
-    plt.show()
+    def run(self, t, method='RK45'):
+        y0 = np.vstack((self.__x0, self.__v0)).ravel()
+        self.t = t
+        sol = scipy.integrate.solve_ivp(self.f, self.__t[[0, -1]],
+                                        y0, t_eval=self.__t, method=method)
+        y = np.reshape(sol.y, (2*self.d, -1, len(sol.t)))
+        self.__t = sol.t
+        self.__x = y[:3, :, :]
+        self.__v = y[3:, :, :]
+        return sol.y
