@@ -8,3 +8,6 @@ __pycache__
 
 # checkpoints left by example files
 *.ipynb_checkpoints
+
+#pytest
+.coverage
