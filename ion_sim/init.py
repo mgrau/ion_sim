@@ -29,9 +29,12 @@ def gaussian(ions, sigma=(1e-6, 1e-6, 1e-6)):
     return x0
 
 
-def string(ions, dx, dim=0):
+def string(ions, dx, dim=0, center=True):
     N = len(ions.m)
     d = ions.d
     x0 = dx * np.zeros((d, N))
-    x0[dim, :] = dx * np.linspace(-(N-1)/2, (N-1)/2, N)
+    if center:
+        x0[dim, :] = dx * np.linspace(-(N-1)/2, (N-1)/2, N)
+    else:
+        x0[dim, :] = dx * np.linspace(0, N-1, N)
     return x0
