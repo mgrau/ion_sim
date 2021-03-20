@@ -10,6 +10,7 @@ setup(name='ion_sim',
       install_requires=[
               'numpy',
               'scipy',
-              'pint'
+              'pint',
+              'autograd'
       ],
       packages=find_packages())
